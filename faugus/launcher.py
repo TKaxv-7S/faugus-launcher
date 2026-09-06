@@ -4238,6 +4238,8 @@ class Main(Gtk.ApplicationWindow, HiDpiMixin):
             edit_game_dialog.set_title(_("Edit %s") % game.title)
             edit_game_dialog.entry_protonfix.set_text(game.protonfix)
             edit_game_dialog.grid_launcher.set_visible(False)
+            edit_game_dialog.button_path_action.set_visible(False)
+            edit_game_dialog.button_search.set_visible(True)
 
             edit_game_dialog.addapp_enabled = game.addapp_enabled
             edit_game_dialog.addapp = game.addapp
@@ -6924,10 +6926,36 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.entry_path.set_tooltip_text(_("Path to the game executable"))
         self.entry_path.set_has_tooltip(True)
         self.entry_path.connect("query-tooltip", on_entry_query_tooltip)
+        path_action_group = Gio.SimpleActionGroup()
+
+        action_path_executable = Gio.SimpleAction.new("executable", None)
+        action_path_executable.connect("activate", lambda action, param: self.on_button_search_clicked(None))
+        path_action_group.add_action(action_path_executable)
+
+        action_path_installer = Gio.SimpleAction.new("installer", None)
+        action_path_installer.connect("activate", lambda action, param: self.on_button_installer_clicked(None))
+        path_action_group.add_action(action_path_installer)
+
+        self.insert_action_group("pathaction", path_action_group)
+
+        path_action_menu = Gio.Menu()
+        path_action_menu.append(_("Select an executable"), "pathaction.executable")
+        path_action_menu.append(_("Run an installer"), "pathaction.installer")
+
+        self.button_path_action = Gtk.MenuButton()
+        self.button_path_action.set_icon_name("system-search-symbolic")
+        self.button_path_action.set_size_request(50, -1)
+        self.button_path_action.set_menu_model(path_action_menu)
+
         self.button_search = Gtk.Button()
         self.button_search.set_child(Gtk.Image.new_from_icon_name("system-search-symbolic"))
         self.button_search.connect("clicked", self.on_button_search_clicked)
         self.button_search.set_size_request(50, -1)
+        self.button_search.set_visible(False)
+
+        self.box_path_action = Gtk.Box()
+        self.box_path_action.append(self.button_path_action)
+        self.box_path_action.append(self.button_search)
 
         self.label_runtime = Gtk.Label(label=_("Runtime"))
         self.label_runtime.set_halign(Gtk.Align.START)
@@ -7277,7 +7305,7 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.grid_path.attach(self.label_path, 0, 0, 1, 1)
         self.grid_path.attach(self.entry_path, 0, 1, 3, 1)
         self.entry_path.set_hexpand(True)
-        self.grid_path.attach(self.button_search, 3, 1, 1, 1)
+        self.grid_path.attach(self.box_path_action, 3, 1, 1, 1)
 
         self.grid_runtime.attach(self.label_runtime, 0, 0, 1, 1)
         self.grid_runtime.attach(self.combobox_runtime, 0, 1, 1, 1)
@@ -8051,6 +8079,8 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         self.grid_steam_title.set_visible(False)
         self.grid_steam_user.set_visible(False)
         self.grid_path.set_visible(False)
+        self.button_path_action.set_visible(False)
+        self.button_search.set_visible(True)
         self.grid_runner.set_visible(False)
         self.grid_runtime.set_visible(False)
         self.grid_prefix.set_visible(False)
@@ -8072,6 +8102,8 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
         if active_id == "windows":
             self.grid_title.set_visible(True)
             self.grid_path.set_visible(True)
+            self.button_path_action.set_visible(True)
+            self.button_search.set_visible(False)
             self.grid_runner.set_visible(True)
             self.grid_prefix.set_visible(True)
             self.button_winetricks.set_visible(True)
@@ -8232,6 +8264,60 @@ class AddGame(Gtk.Dialog, HiDpiMixin):
                 def run_command():
                     process = subprocess.Popen(cmd, cwd=cwd if cwd else None, env=subprocess_env())
                     process.wait()
+
+                run_in_background(run_command)
+
+            destroy_and_release(dialog_fc)
+
+        filechooser.connect("response", on_response)
+        filechooser.present()
+
+    def on_button_installer_clicked(self, widget):
+        validation_result = self.validate_fields(entry="prefix")
+        if not validation_result:
+            return
+
+        filechooser = new_file_chooser(
+            self,
+            _("Select an installer to run in the prefix"),
+            Gtk.FileChooserAction.OPEN,
+        )
+        set_file_chooser_start_folder(filechooser, "run_in_prefix")
+
+        add_windows_file_filters(filechooser)
+
+        def on_response(dialog_fc, response):
+            if response == Gtk.ResponseType.ACCEPT:
+                file_run = dialog_fc.get_file().get_path()
+                title = self.entry_title.get_text()
+                prefix = expand_path(self.entry_prefix.get_text())
+                title_formatted = format_title(title)
+                runner = self.combobox_runner.get_active_id()
+                game_directory = os.path.dirname(file_run)
+                cwd = game_directory if game_directory and os.path.isdir(game_directory) else None
+                escaped_file_run = file_run.replace("'", "'\\''")
+                command_parts = []
+
+                if title_formatted:
+                    command_parts.append(f"LOG_DIR={title_formatted}")
+                if prefix:
+                    command_parts.append(f"WINEPREFIX='{prefix}'")
+                if runner:
+                    command_parts.append(f"PROTONPATH='{resolve_protonpath(runner)}'")
+                command_parts.append(f"'{UMU_RUN}' '{escaped_file_run}'")
+
+                command = ' '.join(command_parts)
+                cmd = (sys.executable, "-m", "faugus.runner", command)
+
+                existing_shortcuts = list_prefix_shortcuts(prefix)
+
+                def run_command():
+                    process = subprocess.Popen(cmd, cwd=cwd if cwd else None, env=subprocess_env())
+                    process.wait()
+
+                    detected_path = detect_installed_executable(prefix, existing_shortcuts)
+                    if detected_path:
+                        GLib.idle_add(self.entry_path.set_text, detected_path)
 
                 run_in_background(run_command)
 
